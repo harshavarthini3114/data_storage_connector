@@ -66,3 +66,34 @@ def initialize_data_warehouse():
     finally:
         connection.close()
 
+
+def stream_joined_records(chunk_size=2):
+    connection = sqlite3.connect("data/warehouse.db")
+    logger = get_production_logger()
+    cursor = connection.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT
+                customer_profiles.customer_id,
+                customer_profiles.age,
+                customer_profiles.income,
+                customer_behavior.churn_risk
+            FROM customer_profiles
+            INNER JOIN customer_behavior
+            ON customer_profiles.customer_id = customer_behavior.customer_id
+        """)
+
+        logger.info("Joined record streaming initialized.")
+
+        while True:
+            rows = cursor.fetchmany(chunk_size)
+
+            if not rows:
+                break
+
+            for row in rows:
+                yield row
+
+    finally:
+        connection.close()
