@@ -5,3 +5,9 @@ if __name__ == "__main__":
 
   logger.info("System core infrastructure initialized successfully.")
   logger.warning("Testing system exception layer alerts.")
+
+from src.db_loader import initialize_data_warehouse
+
+if __name__ == "__main__":
+  initialize_data_warehouse()
+
