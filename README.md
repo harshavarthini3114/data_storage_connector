@@ -69,7 +69,7 @@ Clone the repository and verify pipeline stability locally using these native te
 
 ```powershell
 # 1. Clone the repository infrastructure
-git clone []
+git clone [https://github.com/harshavarthini3114/data_storage_connector.git]
 
 # 2. Navigate to the project directory
 cd data_storage_connector
