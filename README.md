@@ -1,91 +1,174 @@
-# MemStream-DB 🚀
-### Fault-Tolerant Low-Memory Relational Data Streamer
+# MemStream-DB
 
-**Tech Stack:** Python · SQL/SQLite · Generators · Logging · Git
+### Memory-Conscious Relational Data Streamer with Fault-Tolerant Loading
 
----
-
-## 📝 Problem Statement
-In production data pipelines, applications frequently need to process large numbers of complex database records. Standard data pipelines utilize monolithic array loading arrays (such as `.fetchall()` or global data frame reads) that force the entire payload into system memory at once. As datasets grow to millions of rows, this approach triggers fatal **OutOfMemory (RAM Explosion) exceptions**, crashing host instances and escalating infrastructure costs.
-
-**MemStream-DB** resolves this vulnerability by providing a memory-isolated, highly resilient relational data pipeline. It streams stitched transactional and demographic records row-by-row, keeping memory usage bounded by processing database records in controlled batches instead of loading the entire result set into memory.
+**Tech stack:** Python · SQLite · SQL INNER JOIN · Generators · Logging · Git
 
 ---
 
-## 🛠️ Technical Stack
-* **Core Language:** Python 
-* **Data Processing:** Generators, `yield`, `.fetchmany()` pagination
-* **Storage Engine:** SQL / SQLite3
-* **Production Observability:** Native Python `logging` Core (FileHandler)
-* **Error Mitigation:** `try-except-finally` structures, atomic transaction `rollback()`
-* **Version Control:** Git / GitHub
+## Overview
+
+MemStream-DB loads a relational customer dataset into SQLite, joins two related tables, and streams the joined rows back one at a time. Rows are fetched in fixed-size batches with `fetchmany()`, so the reader never pulls the full result set into memory in one call.
+
+It is the data layer of a three-project series:
+
+- **MemStream-DB** (this repository): safe loading and memory-conscious streaming from SQLite.
+- **Automated ML Trainer**: consumes the joined stream, trains and selects models, saves a champion.
+- **FastAPI Serving** (in progress): serves predictions from the saved champion.
+
+Sample dataset: IBM Telco Customer Churn, 7,043 customers.
 
 ---
 
-## 📐 System Architecture & Directory Layout
-The project follows the **Separation of Concerns (SoC)** principle, completely isolating logging metrics, database schemas, streaming logic, and application managers into dedicated structural components:
+## What It Does
+
+1. **Downloads the dataset once.** If `data/telco_churn.csv` already exists, the download is skipped.
+2. **Splits the data into two related tables.**
+   - `customer_profiles`: demographics, account details, contract, charges, and the `Churn` label.
+   - `customer_services`: phone, internet, and streaming services.
+   Both tables share `customerID` as the key.
+3. **Reloads both tables in one transaction.** Either both tables are fully reloaded, or neither is. Running the loader again does not fail with duplicate-key errors.
+4. **Streams the joined result.** An `INNER JOIN` on `customerID` runs in SQLite, and rows are fetched with `fetchmany(chunk_size)` and yielded one at a time.
+5. **Logs every step** to `app.log` with timestamp, level, file name, and line number.
+
+---
+
+## Design Decisions
+
+### Chunked streaming instead of `fetchall()`
+`fetchall()` returns every row in one list. `fetchmany(chunk_size)` returns a fixed-size batch, and the generator yields rows from it. The Python side holds one batch at a time.
+
+### Two tables, one stream
+The join is kept in the database engine, so the consumer receives already-stitched rows and does not have to merge the tables itself. The output column order matches the original single-table layout, so downstream code does not change.
+
+### Deterministic row order
+The join is ordered by the profile table's `rowid`, which is the CSV order. This keeps the order stable across runs, so any downstream train/test split stays reproducible.
+
+### Transaction-safe reload
+Both tables are cleared and reloaded inside one transaction. Any error rolls back both tables and logs a `CRITICAL` entry before the exception is re-raised. The connection is always closed in a `finally` block.
+
+### Explicit handling of blank values
+`TotalCharges` is blank for customers with tenure 0. These are stored as `0.0` on purpose.
+
+---
+
+## Project Structure
 
 ```text
 data_storage_connector/
-│
-├── data/
-│   └── warehouse.db         # Persistent Relational Storage (Excluded from Git)
-│
+├── data/                       # generated at runtime, not committed
+│   ├── telco_churn.csv
+│   └── warehouse.db
 ├── docs/
 │   └── screenshots/
-│       ├── app-log-output.png  # Verifiable app.log verification trace
-│       └── terminal-output.png # Verifiable terminal execution trace
-│
+│       ├── terminal-output.png
+│       └── app-log-output.png
 ├── src/
-│   ├── __init__.py          # Package Initialization Profile
-│   ├── logger.py            # Module 1: Central Observability Engine
-│   └── db_loader.py         # Modules 2 & 3: Database Schemas & Batch Streaming Core
-│
-├── main.py                  # Module 4: Application Entry Point & Manager
-└── .gitignore               # Strict Corporate Git Exclusion Filters
+│   ├── __init__.py
+│   ├── logger.py               # shared logger (file handler, no duplicate handlers)
+│   └── db_loader.py            # download, two-table load, joined streaming
+├── main.py                     # entry point: load, then stream and count
+├── requirements.txt
+├── .gitignore
+└── README.md
 ```
 
 ---
 
-## ⚙️ Key Engineering Optimizations & Implementations
+## Schema
 
-### 1. Memory-Safe Batch Data Streaming
-Instead of using memory-expensive `.fetchall()` calls, the pipeline uses `.fetchmany(chunk_size)` to retrieve records in highly controlled batches. Python generators utilizing the `yield` keyword then deliver individual records incrementally to the caller, isolating the active memory graph from horizontal data scale.
+**`customer_profiles`** (one row per customer, primary key `customerID`)
 
-### 2. Analytical SQL Joining
-Stitches isolated entity features (`customer_profiles` and `customer_behavior`) on the fly uses an `SQL INNER JOIN` to combine customer profile and behavior data at query time filters on matching relational primary keys (`customer_id`). Joined records are queried directly from the relational database structure before being streamed to the processing engine.
+| Column group | Columns |
+|---|---|
+| Identity | `customerID` |
+| Demographics | `gender`, `SeniorCitizen`, `Partner`, `Dependents` |
+| Account | `tenure`, `Contract`, `PaperlessBilling`, `PaymentMethod` |
+| Charges | `MonthlyCharges`, `TotalCharges` |
+| Label | `Churn` |
 
-### 3. Defensive Transaction Safety (`rollback()`)
-Database connections are protected with robust `try-except-finally` code blocks. If a SQLite error occurs during transaction states, the pipeline automatically calls **`rollback()`** to protect database metadata from corruption, writes a `CRITICAL` alert through the centralized logger, and closes the connection cleanly in the `finally` layer.
+**`customer_services`** (one row per customer, same `customerID`)
 
-### 4. Centralized Production Logging
-Instead of relying on volatile, high-overhead `print()` statements for system tracking, the project implements a centralized file handler system. System events are written to `app.log` containing precise timestamps, severity markers (`INFO`, `WARNING`, `CRITICAL`), source filenames, and the exact lines of code where events occurred.
+| Column group | Columns |
+|---|---|
+| Phone | `PhoneService`, `MultipleLines` |
+| Internet | `InternetService`, `OnlineSecurity`, `OnlineBackup`, `DeviceProtection`, `TechSupport` |
+| Streaming | `StreamingTV`, `StreamingMovies` |
+
+The joined stream returns 21 columns in the original dataset order.
 
 ---
 
-## 💻 How to Clone and Execute Locally
-
-Clone the repository and verify pipeline stability locally using these native terminal commands:
+## Setup
 
 ```powershell
-# 1. Clone the repository infrastructure
-git clone [https://github.com/harshavarthini3114/data_storage_connector.git]
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-# 2. Navigate to the project directory
-cd data_storage_connector
+---
 
-# 3. Run the application entry point
+## Usage
+
+Run from the project root (the folder containing `main.py`):
+
+```powershell
 python main.py
 ```
 
+`main.py` loads the warehouse, then streams every joined record and counts them.
+
+To use the stream in another project:
+
+```python
+from src.db_loader import stream_joined_records, get_column_names
+
+columns = get_column_names()
+for row in stream_joined_records(chunk_size=32):
+    record = dict(zip(columns, row))
+    # process one customer at a time
+```
+
 ---
 
-## 🔎 Verification & Production Outputs
+## Output
 
-### 1. Terminal Execution Trace
-The streaming data conveyor belt handles row-by-row extraction dynamically across the local host system environment.
-![Terminal Pipeline Execution Output](docs/screenshots/app-log-output.png)
+### Expected log lines (`app.log`)
 
-### 2. Persistent Production Audit Trail (`app.log`)
-System operations, severity alerts, and resource allocation lifecycles are monitored seamlessly without human intervention.
-![Centralized File Logger Output Trace](docs/screenshots/terminal-output.png)
+```text
+CSV already present, skipping download.
+Successfully loaded 7043 customers into customer_profiles and customer_services.
+Joined customer stream initialized.
+Joined customer stream complete.
+Streamed 7043 joined records.
+```
+
+On a first run without a local CSV, the download lines appear before the load line.
+
+### Terminal output
+
+![Terminal output](docs/screenshots/terminal-output.png)
+
+### Application log
+
+![Application log output](docs/screenshots/app-log-output.png)
+
+Running `python main.py` a second time should produce the same count (7043) and no errors.
+
+---
+
+## Limitations
+
+- **Streaming ends at the loader.** Downstream consumers that need the full matrix (for example, scikit-learn training) collect the rows into memory. Memory is bounded at the database-reading layer.
+- **Single-writer SQLite.** Fine for this project, not for concurrent writers.
+- **Fixed download URL.** If the upstream file moves, the download step must be updated.
+- **Full reload each run.** The loader clears and reloads both tables on every call. Fine for 7,043 rows; incremental loading would be needed for larger, changing data.
+
+---
+
+## Roadmap
+
+- Add a row-count check after load, and fail loudly if the count is wrong.
+- Move hard-coded paths and the download URL into a config file.
+- Add incremental loading for updated records.

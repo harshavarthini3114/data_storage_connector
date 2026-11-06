@@ -1,6 +1,11 @@
+data/
+*.db
+*.csv
+app.log
 __pycache__/
 *.pyc
-data/*.db
-*.log
 venv/
 .venv/
+.vscode/
+.idea/
+.env

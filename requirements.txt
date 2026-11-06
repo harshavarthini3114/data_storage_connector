@@ -1,0 +1,2 @@
+# MemStream-DB uses only the Python standard library (sqlite3, csv, urllib, logging).
+# No third-party packages to install.
